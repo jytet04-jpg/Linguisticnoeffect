@@ -1,0 +1,5 @@
+{
+  "name": "Linguist AI - English Sentence Builder",
+  "description": "An offline English learning app where users build sentences by clicking words. Supports importing and exporting custom text files.",
+  "requestFramePermissions": []
+}
