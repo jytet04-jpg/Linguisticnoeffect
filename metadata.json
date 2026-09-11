@@ -1,5 +1,6 @@
 {
   "name": "Linguist AI - English Sentence Builder",
-  "description": "An offline English learning app where users build sentences by clicking words. Supports importing and exporting custom text files.",
-  "requestFramePermissions": []
+  "description": "An offline English learning app where users build sentences, study flashcards, take notes, and solve custom multiple-choice .txt tests with instant feedback.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
