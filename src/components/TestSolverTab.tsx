@@ -23,7 +23,8 @@ import {
   BookOpen,
   Filter,
   Copy,
-  Info
+  Info,
+  Shuffle
 } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
@@ -39,7 +40,10 @@ import {
   saveSingleTestSession,
   clearSingleTestSession,
   saveLastActiveTestDeckId,
-  loadLastActiveTestDeckId
+  loadLastActiveTestDeckId,
+  loadShuffleOptionsSetting,
+  saveShuffleOptionsSetting,
+  shuffleDeckQuestionsOptions
 } from '../utils/testParser';
 
 interface TestSolverTabProps {
@@ -65,6 +69,18 @@ export const TestSolverTab: React.FC<TestSolverTabProps> = ({
 
   // Saved in-progress sessions for each deck
   const [testSessions, setTestSessions] = useState<TestSessionsMap>(() => loadTestSessions());
+
+  // Option shuffling setting (anti-memorization mode)
+  const [shuffleOptions, setShuffleOptions] = useState<boolean>(() => loadShuffleOptionsSetting());
+
+  const handleToggleShuffleOptions = () => {
+    const nextVal = !shuffleOptions;
+    setShuffleOptions(nextVal);
+    saveShuffleOptionsSetting(nextVal);
+    showToast(nextVal
+      ? "Şıkları karıştırma aktif: Yeni test başlatıldığında ve baştan çözüldüğünde şıklar otomatik dağıtılacak."
+      : "Şıkları karıştırma kapatıldı: Orijinal şık sırası kullanılacak.");
+  };
 
   // Deck management states
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
@@ -247,13 +263,15 @@ export const TestSolverTab: React.FC<TestSolverTabProps> = ({
         lastAnsweredQuestionIndex: highestAnsweredIdx >= 0 ? highestAnsweredIdx : undefined,
         userAnswers,
         isRetryOnlyWrongMode,
+        activeQuestions,
+        isShuffled: shuffleOptions,
         lastUpdated: Date.now()
       };
       saveSingleTestSession(session);
       saveLastActiveTestDeckId(activeDeck.id);
       setTestSessions(prev => ({ ...prev, [activeDeck.id]: session }));
     }
-  }, [activeDeck, currentQuestionIdx, userAnswers, isTestFinished, isRetryOnlyWrongMode, activeQuestions]);
+  }, [activeDeck, currentQuestionIdx, userAnswers, isTestFinished, isRetryOnlyWrongMode, activeQuestions, shuffleOptions]);
 
   // If user exits or closes app, auto-resume on mount if was active
   useEffect(() => {
@@ -300,11 +318,22 @@ export const TestSolverTab: React.FC<TestSolverTabProps> = ({
     setShowReviewList(false);
 
     if (savedSession && !forceRestart) {
-      const qList = savedSession.isRetryOnlyWrongMode
-        ? deck.questions.filter(q => savedSession.userAnswers[q.id] && !savedSession.userAnswers[q.id].isCorrect)
-        : deck.questions;
-      
-      const resolvedQuestions = qList.length > 0 ? qList : deck.questions;
+      // Prioritize saved activeQuestions if available (so resumed session keeps identical option order)
+      let resolvedQuestions: TestQuestion[];
+      if (savedSession.activeQuestions && savedSession.activeQuestions.length > 0) {
+        resolvedQuestions = savedSession.isRetryOnlyWrongMode
+          ? savedSession.activeQuestions.filter(q => savedSession.userAnswers[q.id] && !savedSession.userAnswers[q.id].isCorrect)
+          : savedSession.activeQuestions;
+      } else {
+        const base = savedSession.isShuffled ? shuffleDeckQuestionsOptions(deck.questions) : deck.questions;
+        resolvedQuestions = savedSession.isRetryOnlyWrongMode
+          ? base.filter(q => savedSession.userAnswers[q.id] && !savedSession.userAnswers[q.id].isCorrect)
+          : base;
+      }
+
+      if (resolvedQuestions.length === 0) {
+        resolvedQuestions = deck.questions;
+      }
       setActiveQuestions(resolvedQuestions);
 
       // Determine the exact resume question using the helper
@@ -317,12 +346,20 @@ export const TestSolverTab: React.FC<TestSolverTabProps> = ({
       const answeredCount = Object.keys(savedSession.userAnswers || {}).length;
       showToast(`Kaldığınız yerden devam ediliyor: Soru ${targetIdx + 1} (${answeredCount} cevaplandı)`);
     } else {
-      setActiveQuestions(deck.questions);
+      // Brand new test start: shuffle if setting is enabled
+      const preparedQuestions = shuffleOptions
+        ? shuffleDeckQuestionsOptions(deck.questions)
+        : deck.questions;
+
+      setActiveQuestions(preparedQuestions);
       setCurrentQuestionIdx(0);
       setUserAnswers({});
       setIsRetryOnlyWrongMode(false);
       clearSingleTestSession(deck.id);
       setTestSessions(loadTestSessions());
+      if (shuffleOptions) {
+        showToast("Test başlatıldı: Şıklar rastgele karıştırıldı.");
+      }
     }
 
     saveLastActiveTestDeckId(deck.id);
@@ -336,6 +373,8 @@ export const TestSolverTab: React.FC<TestSolverTabProps> = ({
         currentQuestionIdx,
         userAnswers,
         isRetryOnlyWrongMode,
+        activeQuestions,
+        isShuffled: shuffleOptions,
         lastUpdated: Date.now()
       };
       saveSingleTestSession(session);
@@ -353,10 +392,14 @@ export const TestSolverTab: React.FC<TestSolverTabProps> = ({
     showToast("Test ilerlemesi sıfırlandı.");
   };
 
-  // Restart active test from scratch
+  // Restart active test from scratch (reshuffles options if shuffleOptions is on)
   const handleRestartTest = () => {
     if (!activeDeck) return;
-    setActiveQuestions(activeDeck.questions);
+    const questionsToUse = shuffleOptions
+      ? shuffleDeckQuestionsOptions(activeDeck.questions)
+      : activeDeck.questions;
+
+    setActiveQuestions(questionsToUse);
     setCurrentQuestionIdx(0);
     setUserAnswers({});
     setIsTestFinished(false);
@@ -365,7 +408,9 @@ export const TestSolverTab: React.FC<TestSolverTabProps> = ({
     clearSingleTestSession(activeDeck.id);
     setTestSessions(loadTestSessions());
     saveLastActiveTestDeckId(activeDeck.id);
-    showToast("Test baştan başlatıldı.");
+    showToast(shuffleOptions 
+      ? "Test yeni rastgele şıklarla baştan başlatıldı." 
+      : "Test baştan başlatıldı.");
   };
 
   // Retry only wrong questions
@@ -381,13 +426,17 @@ export const TestSolverTab: React.FC<TestSolverTabProps> = ({
       return;
     }
 
-    setActiveQuestions(wrongQuestions);
+    const questionsToUse = shuffleOptions
+      ? shuffleDeckQuestionsOptions(wrongQuestions)
+      : wrongQuestions;
+
+    setActiveQuestions(questionsToUse);
     setCurrentQuestionIdx(0);
     setUserAnswers({});
     setIsTestFinished(false);
     setShowReviewList(false);
     setIsRetryOnlyWrongMode(true);
-    showToast(`Yanlış yapılan ${wrongQuestions.length} soru ile tekrar başladı.`);
+    showToast(`Yanlış yapılan ${wrongQuestions.length} soru${shuffleOptions ? ' (şıklar karıştırılarak)' : ''} ile tekrar başladı.`);
   };
 
   // Finish test and show results
@@ -660,6 +709,20 @@ export const TestSolverTab: React.FC<TestSolverTabProps> = ({
               <RotateCcw size={16} /> Testi Baştan Çöz
             </button>
 
+            <button
+              id="test-btn-toggle-shuffle-results"
+              onClick={handleToggleShuffleOptions}
+              className={`px-4 py-2.5 sm:py-3 rounded-xl border text-sm font-semibold flex items-center gap-2 transition ${
+                shuffleOptions
+                  ? 'bg-indigo-950/70 border-indigo-500/80 text-indigo-300'
+                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
+              }`}
+              title="Açık olduğunda 'Testi Baştan Çöz'e basınca şıklar otomatik yeniden karıştırılır"
+            >
+              <Shuffle size={16} className={shuffleOptions ? "text-indigo-400" : "text-zinc-500"} />
+              <span>Şıkları Karıştır: <strong className={shuffleOptions ? "text-indigo-300" : "text-zinc-400"}>{shuffleOptions ? "Açık" : "Kapalı"}</strong></span>
+            </button>
+
             {stats.wrong > 0 && (
               <button
                 id="test-btn-retry-wrong"
@@ -823,10 +886,24 @@ export const TestSolverTab: React.FC<TestSolverTabProps> = ({
               <h2 className="text-sm sm:text-base font-bold text-white truncate max-w-xs sm:max-w-md">
                 {activeDeck.title}
               </h2>
-              <span className="text-xs text-indigo-400 font-medium flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                Anında Bildirim Modu
-              </span>
+              <div className="flex items-center gap-2 mt-0.5">
+                <span className="text-xs text-indigo-400 font-medium flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  Anında Bildirim Modu
+                </span>
+                <span className="text-zinc-700">•</span>
+                <button
+                  id="test-toggle-shuffle-header-btn"
+                  onClick={handleToggleShuffleOptions}
+                  className={`text-[11px] font-medium flex items-center gap-1 transition ${
+                    shuffleOptions ? 'text-indigo-300' : 'text-zinc-500 hover:text-zinc-300'
+                  }`}
+                  title="Şıkları karıştırma ayarını değiştir"
+                >
+                  <Shuffle size={11} className={shuffleOptions ? "text-indigo-400" : "text-zinc-500"} />
+                  Şıklar: {shuffleOptions ? 'Karışık' : 'Orijinal'}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -886,9 +963,16 @@ export const TestSolverTab: React.FC<TestSolverTabProps> = ({
         {/* Active Question Card */}
         <div className="bg-zinc-950 rounded-3xl p-6 sm:p-8 border border-zinc-900 shadow-xl relative overflow-hidden flex flex-col gap-6">
           <div className="flex items-center justify-between border-b border-zinc-900 pb-3">
-            <span className="text-xs font-bold uppercase tracking-wider text-indigo-400 bg-indigo-950/50 px-3 py-1 rounded-full border border-indigo-900/50">
-              Soru #{currentQuestionIdx + 1}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-indigo-400 bg-indigo-950/50 px-3 py-1 rounded-full border border-indigo-900/50">
+                Soru #{currentQuestionIdx + 1}
+              </span>
+              {shuffleOptions && (
+                <span className="text-[10px] font-semibold text-indigo-300 bg-indigo-950/60 px-2 py-0.5 rounded-full border border-indigo-900/60 flex items-center gap-1" title="Şıkların yerleri rastgele dağıtıldı (Ezber önleyici)">
+                  <Shuffle size={10} className="text-indigo-400" /> Şıklar Karışık
+                </span>
+              )}
+            </div>
 
             {/* Answer Status Badge */}
             {isAnswered ? (
@@ -1156,10 +1240,27 @@ export const TestSolverTab: React.FC<TestSolverTabProps> = ({
 
       {/* Decks List */}
       <div className="flex flex-col gap-4">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-2">
           <h3 className="text-sm sm:text-base font-bold text-zinc-200 flex items-center gap-2">
             <BookOpen size={17} className="text-indigo-400" /> Kayıtlı Testler ({testDecks.length})
           </h3>
+
+          <button
+            id="toggle-shuffle-options-main-btn"
+            onClick={handleToggleShuffleOptions}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 transition border ${
+              shuffleOptions 
+                ? 'bg-indigo-950/70 border-indigo-500/80 text-indigo-300 shadow-sm shadow-indigo-950' 
+                : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+            }`}
+            title="Açık olduğunda yeni test başladığında veya tekrar çözüldüğünde şıklar otomatik karıştırılarak harf ezberi önlenir"
+          >
+            <Shuffle size={14} className={shuffleOptions ? "text-indigo-400" : "text-zinc-500"} />
+            <span>Şıkları Karıştır:</span>
+            <span className={`font-bold ${shuffleOptions ? 'text-indigo-300' : 'text-zinc-500'}`}>
+              {shuffleOptions ? 'Açık' : 'Kapalı'}
+            </span>
+          </button>
         </div>
 
         {testDecks.length === 0 ? (
@@ -1213,6 +1314,11 @@ export const TestSolverTab: React.FC<TestSolverTabProps> = ({
                       <span className="text-xs px-2.5 py-0.5 rounded-md bg-zinc-900 text-zinc-400 border border-zinc-800">
                         {questionCount} Soru
                       </span>
+                      {shuffleOptions && (
+                        <span className="text-xs px-2 py-0.5 rounded-md bg-indigo-950/40 text-indigo-300 border border-indigo-900/40 flex items-center gap-1 font-medium" title="Şıklar her çözüşte rastgele dağıtılır">
+                          <Shuffle size={10} className="text-indigo-400" /> Şıklar Karışık
+                        </span>
+                      )}
                       {bestScore && (
                         <span className="text-xs px-2.5 py-0.5 rounded-md bg-emerald-950/60 text-emerald-300 border border-emerald-800/60 flex items-center gap-1 font-medium">
                           <Trophy size={11} className="text-amber-400" /> En İyi: %{bestScore.percentage} ({bestScore.correct}/{bestScore.total})
